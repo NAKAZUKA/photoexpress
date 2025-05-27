@@ -1,0 +1,11 @@
+version: '3.9'
+
+services:
+  photoexpress-bot:
+    build: .
+    container_name: photoexpress-bot
+    env_file:
+      - .env
+    volumes:
+      - ./db:/app/db
+    restart: unless-stopped
