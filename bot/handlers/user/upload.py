@@ -1,6 +1,8 @@
 import uuid
 import shutil
 import os
+from datetime import datetime
+
 from aiogram import Dispatcher, F
 from aiogram.types import (
     Message,
@@ -20,7 +22,6 @@ from bot.services.storage import save_photo_to_order_folder
 from bot.services.pricing import calculate_order_price
 from bot.services.maps import get_nearest_pickup_points
 from bot.keyboards.common import main_menu_keyboard
-from datetime import datetime
 
 # Supported print formats
 FORMATS = ["10x15", "13x18", "15x21", "21x30 (A4)", "30x40", "30x45"]
@@ -138,7 +139,7 @@ def register_upload_handlers(dp: Dispatcher):
         )
         await state.set_state(UploadFSM.waiting_for_comment)
 
-    # 7) Получение комментария и сохранение заказа (без сброса state)
+    # 7) Получение комментария и сохранение заказа
     @dp.message(UploadFSM.waiting_for_comment, F.text)
     async def receive_comment_and_finalize(message: Message, state: FSMContext):
         data = await state.get_data()
@@ -187,8 +188,6 @@ def register_upload_handlers(dp: Dispatcher):
             resize_keyboard=True,
         )
         await message.answer(text, parse_mode="HTML", reply_markup=kb)
-
-        # Переводим FSM в этап выбора ПВЗ
         await state.set_state(UploadFSM.choosing_pickup_point)
 
     # 8) Выбор по геолокации
@@ -228,7 +227,6 @@ def register_upload_handlers(dp: Dispatcher):
 
         db = SessionLocal()
         pp = db.query(PickupPoint).filter_by(id=pp_id).first()
-        # Сохраняем поля до закрытия сессии
         pp_name, pp_address = pp.name, pp.address
         order = db.query(Order).filter_by(order_id=order_id).first()
         if order:
@@ -240,36 +238,9 @@ def register_upload_handlers(dp: Dispatcher):
             f"📍 Вы выбрали ПВЗ: {pp_name}\n{pp_address}",
             reply_markup=main_menu_keyboard(),
         )
-
         await state.clear()
 
-    # 11) Оплата
-    @dp.message(F.text == "💳 Оплатить")
-    async def mark_paid(message: Message, state: FSMContext):
-        db = SessionLocal()
-        user = db.query(User).filter_by(telegram_id=message.from_user.id).first()
-        order = (
-            db.query(Order)
-            .filter_by(user_id=user.id)
-            .order_by(desc(Order.created_at))
-            .first()
-        )
-        status_in_process = get_status_code(db, "Обработке")
-        if order:
-            order.paid = True
-            order.status = status_in_process
-            db.commit()
-            label = db.query(OrderStatus).filter_by(code=status_in_process).first().label
-            await message.answer(
-                f"✅ Заказ оплачен! Статус: <b>{label}</b>",
-                reply_markup=main_menu_keyboard(),
-                parse_mode="HTML",
-            )
-        else:
-            await message.answer("❗ Нет заказа для оплаты.")
-        db.close()
-
-    # 12) Отмена заказа
+    # 11) Отмена заказа (во время создания)
     @dp.message(F.text == "❌ Отменить заказ")
     async def cancel_order(message: Message, state: FSMContext):
         db = SessionLocal()

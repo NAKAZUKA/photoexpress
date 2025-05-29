@@ -20,11 +20,52 @@ class OrdersFSM(StatesGroup):
     confirming_cancel = State()
     editing_pickup = State()
 
-
 def get_status_code(db, label_substring: str) -> str:
     status = db.query(OrderStatus).filter(OrderStatus.label.contains(label_substring)).first()
     return status.code if status else "new"
 
+async def _send_orders_list(message: Message, orders: list[Order], status_label: str, page: int):
+    text = f"<b>📦 Заказы — {status_label}</b>\n\n"
+    kb = InlineKeyboardMarkup(inline_keyboard=[])
+
+    for o in orders:
+        photo_lines = [
+            f"• {p['filename']} — {p['format']}, {p['copies']} коп."
+            for p in o.photos
+        ]
+        price_str = f"{float(o.price):.2f}".rstrip("0").rstrip(".")
+        payment_str = "❗ Не оплачен" if not o.paid else "✅ Оплачен"
+        text += (
+            f"🆔 <code>{o.order_id[:8]}</code>  📅 {o.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"🖼 Фото: {len(o.photos)} шт.\n"
+            + "\n".join(photo_lines) + "\n"
+            f"💰 {price_str} ₽ — {payment_str}\n"
+            f"📍 {o.delivery_point or 'Пункт не выбран'}\n"
+            f"👤 Получатель: {o.receiver_name or '—'}\n"
+            f"📞 Телефон: {o.receiver_phone or '—'}\n"
+            f"💬 {o.comment or '—'}\n\n"
+        )
+        # Изменить / Отменить
+        kb.inline_keyboard.append([
+            InlineKeyboardButton(text="✏ Изменить", callback_data=f"edit:{o.order_id}"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{o.order_id}")
+        ])
+        # Кнопка оплаты, если не оплачено
+        if not o.paid:
+            kb.inline_keyboard.append([
+                InlineKeyboardButton(text="💳 Оплатить", callback_data=f"pay:{o.order_id}")
+            ])
+
+    # Навигация
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="⬅ Назад", callback_data="page:prev"),
+        InlineKeyboardButton(text="➡ Далее", callback_data="page:next")
+    ])
+    kb.inline_keyboard.append([
+        InlineKeyboardButton(text="🔙 К категориям", callback_data="back:status")
+    ])
+
+    await message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 def register_orders_handlers(dp: Dispatcher):
     @dp.message(F.text == "📦 Мои заказы")
@@ -32,8 +73,7 @@ def register_orders_handlers(dp: Dispatcher):
         db = SessionLocal()
         statuses = db.query(OrderStatus).order_by(OrderStatus.sort_order).all()
         db.close()
-        kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")]
-                   for s in statuses]
+        kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")] for s in statuses]
         await message.answer(
             "📦 Выберите категорию заказов:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -64,49 +104,41 @@ def register_orders_handlers(dp: Dispatcher):
         await _send_orders_list(callback_query.message, orders, status.label, 0)
         await state.set_state(OrdersFSM.browsing_orders)
 
-    async def _send_orders_list(message: Message, orders: list[Order], status_label: str, page: int):
-        text = f"<b>📦 Заказы — {status_label}</b>\n\n"
-        kb = InlineKeyboardMarkup(inline_keyboard=[])
+    @dp.callback_query(F.data.startswith("pay:"), OrdersFSM.browsing_orders)
+    async def pay_order(callback_query: CallbackQuery, state: FSMContext):
+        order_id = callback_query.data.split(":",1)[1]
+        db = SessionLocal()
+        order = db.query(Order).filter_by(order_id=order_id).first()
+        if order and not order.paid:
+            order.paid = True
+            db.commit()
+            await callback_query.answer("✅ Заказ оплачен.", show_alert=True)
+        else:
+            await callback_query.answer("❗ Невозможно оплатить этот заказ.", show_alert=True)
 
-        for o in orders:
-            photo_lines = [
-                f"• {p['filename']} — {p['format']}, {p['copies']} коп."
-                for p in o.photos
-            ]
-            price_str = f"{float(o.price):.2f}".rstrip("0").rstrip(".")
-            payment_str = "❗ Не оплачен" if not o.paid else "✅ Оплачен"
-            text += (
-                f"🆔 <code>{o.order_id[:8]}</code>  📅 {o.created_at.strftime('%d.%m.%Y %H:%M')}\n"
-                f"🖼 Фото: {len(o.photos)} шт.\n"
-                + "\n".join(photo_lines) + "\n"
-                f"💰 {price_str} ₽ — {payment_str}\n"
-                f"📍 {o.delivery_point or 'Пункт не выбран'}\n"
-                f"👤 Получатель: {o.receiver_name or '—'}\n"
-                f"📞 Телефон: {o.receiver_phone or '—'}\n"
-                f"💬 {o.comment or '—'}\n\n"
-            )
-            kb.inline_keyboard.append([
-                InlineKeyboardButton(text="✏ Изменить", callback_data=f"edit:{o.order_id}"),
-                InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel:{o.order_id}")
-            ])
-
-        # Навигация
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="⬅ Назад", callback_data="page:prev"),
-            InlineKeyboardButton(text="➡ Далее", callback_data="page:next")
-        ])
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="🔙 К категориям", callback_data="back:status")
-        ])
-        await message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+        # Обновляем список на той же странице
+        data = await state.get_data()
+        status_code = data.get("status_filter")
+        page = data.get("page", 0)
+        user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
+        orders = (
+            db.query(Order)
+            .filter_by(user_id=user.id, status=status_code)
+            .order_by(desc(Order.created_at))
+            .offset(page * 1)
+            .limit(1)
+            .all()
+        )
+        status_label = db.query(OrderStatus).filter_by(code=status_code).first().label
+        db.close()
+        await _send_orders_list(callback_query.message, orders, status_label, page)
 
     @dp.callback_query(F.data == "back:status")
     async def back_to_status(callback_query: CallbackQuery, state: FSMContext):
         db = SessionLocal()
         statuses = db.query(OrderStatus).order_by(OrderStatus.sort_order).all()
         db.close()
-        kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")]
-                   for s in statuses]
+        kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")] for s in statuses]
         await callback_query.message.edit_text(
             "📦 Выберите категорию заказов:",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -116,11 +148,11 @@ def register_orders_handlers(dp: Dispatcher):
 
     @dp.callback_query(F.data.startswith("page:"), OrdersFSM.browsing_orders)
     async def paginate_orders(callback_query: CallbackQuery, state: FSMContext):
-        direction = callback_query.data.split(":", 1)[1]
+        direction = callback_query.data.split(":",1)[1]
         data = await state.get_data()
         status_code = data.get("status_filter")
-        page = data.get("page", 0)
-        new_page = max(page - 1, 0) if direction == "prev" else page + 1
+        page = data.get("page",0)
+        new_page = max(page-1,0) if direction=="prev" else page+1
 
         db = SessionLocal()
         user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
@@ -129,47 +161,43 @@ def register_orders_handlers(dp: Dispatcher):
             db.query(Order)
             .filter_by(user_id=user.id, status=status_code)
             .order_by(desc(Order.created_at))
-            .offset(new_page * 3)
-            .limit(3)
+            .offset(new_page*1)
+            .limit(1)
             .all()
         )
         db.close()
-
         if not orders:
             await callback_query.answer("Больше нет заказов.", show_alert=True)
             return
-
         await state.update_data(page=new_page)
         await _send_orders_list(callback_query.message, orders, status.label, new_page)
         await callback_query.answer()
 
     @dp.callback_query(F.data.startswith("cancel:"), OrdersFSM.browsing_orders)
     async def cancel_order_callback(callback_query: CallbackQuery, state: FSMContext):
-        order_id = callback_query.data.split(":", 1)[1]
+        order_id = callback_query.data.split(":",1)[1]
         db = SessionLocal()
         order = db.query(Order).filter_by(order_id=order_id).first()
         user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
         if order:
             folder = f"uploads/{user.telegram_id}/{order.order_id}"
-            if os.path.exists(folder):
-                shutil.rmtree(folder)
+            if os.path.exists(folder): shutil.rmtree(folder)
             db.delete(order)
             db.commit()
-
+            # Обновляем список
             data = await state.get_data()
             status_code = data.get("status_filter")
-            page = data.get("page", 0)
+            page = data.get("page",0)
             status = db.query(OrderStatus).filter_by(code=status_code).first()
             orders = (
                 db.query(Order)
                 .filter_by(user_id=user.id, status=status_code)
                 .order_by(desc(Order.created_at))
-                .offset(page * 3)
-                .limit(3)
+                .offset(page*1)
+                .limit(1)
                 .all()
             )
             db.close()
-
             await callback_query.answer("Заказ отменён.", show_alert=True)
             if orders:
                 await _send_orders_list(callback_query.message, orders, status.label, page)
@@ -177,8 +205,7 @@ def register_orders_handlers(dp: Dispatcher):
                 db2 = SessionLocal()
                 statuses = db2.query(OrderStatus).order_by(OrderStatus.sort_order).all()
                 db2.close()
-                kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")]
-                           for s in statuses]
+                kb_rows = [[InlineKeyboardButton(text=s.label, callback_data=f"status:{s.code}")] for s in statuses]
                 await callback_query.message.edit_text(
                     "❗ Заказы не найдены в этой категории.",
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows)
@@ -186,16 +213,8 @@ def register_orders_handlers(dp: Dispatcher):
                 await state.set_state(OrdersFSM.choosing_status)
         else:
             db.close()
-            await callback_query.answer("Заказ не найден.", show_alert=True)
+            await callback_query.answer("❗ Заказ не найден.", show_alert=True)
 
-    @dp.callback_query(F.data.startswith("edit:"))
-    async def edit_selected_order(callback_query: CallbackQuery, state: FSMContext):
-        order_id = callback_query.data.split(":", 1)[1]
-        db = SessionLocal()
-        order = db.query(Order).filter_by(order_id=order_id).first()
-        db.close()
-        if not order:
-            await callback_query.message.answer("❗ Заказ не найден.")
             return
 
         await state.update_data(editing_order_id=order_id)
