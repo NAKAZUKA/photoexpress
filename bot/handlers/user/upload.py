@@ -139,7 +139,7 @@ def register_upload_handlers(dp: Dispatcher):
         )
         await state.set_state(UploadFSM.waiting_for_comment)
 
-    # 7) Получение комментария и сохранение заказа
+    # 7) Получение комментария и сохранение заказа (но БЕЗ финального «📦 Заказ сформирован»)
     @dp.message(UploadFSM.waiting_for_comment, F.text)
     async def receive_comment_and_finalize(message: Message, state: FSMContext):
         data = await state.get_data()
@@ -169,25 +169,22 @@ def register_upload_handlers(dp: Dispatcher):
         db.commit()
         db.close()
 
-        photo_lines = [
-            f"• {p['filename']} — {p['format']}, {p['copies']} коп." for p in photos
-        ]
-        text = (
-            "📦 <b>Заказ сформирован</b>\n\n"
-            + "\n".join(photo_lines)
-            + f"\n\n💬 Комментарий: {comment or '—'}\n"
-            + f"💰 Стоимость: <b>{price:.2f} ₽</b> (скидка: {discount:.2f} ₽)\n"
-            + "📍 Статус: <b>новый</b>\n\n"
-            + "Теперь выберите пункт выдачи:"
-        )
+        # Здесь НЕ выводим «📦 Заказ сформирован». Сразу переходим к выбору ПВЗ:
         kb = ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="📍 Отправить геолокацию(временно не работает)", request_location=True)],
+                [KeyboardButton(
+                    text="📍 Отправить геолокацию(временно не работает)",
+                    request_location=True
+                )],
                 [KeyboardButton(text="📋 Показать список")],
             ],
             resize_keyboard=True,
         )
-        await message.answer(text, parse_mode="HTML", reply_markup=kb)
+        await message.answer(
+            "✅ Заказ сохранён!\nТеперь выберите пункт выдачи:",
+            parse_mode="HTML",
+            reply_markup=kb
+        )
         await state.set_state(UploadFSM.choosing_pickup_point)
 
     # 8) Выбор по геолокации
@@ -201,7 +198,8 @@ def register_upload_handlers(dp: Dispatcher):
             kb.inline_keyboard.append([
                 InlineKeyboardButton(
                     text=f"{i}. {p.name} — {p.address}",
-                    callback_data=f"select_pp:{p.id}" )
+                    callback_data=f"select_pp:{p.id}"
+                )
             ])
         await message.answer("Найдены ближайшие ПВЗ, выберите:", reply_markup=kb)
 
@@ -214,11 +212,12 @@ def register_upload_handlers(dp: Dispatcher):
             kb.inline_keyboard.append([
                 InlineKeyboardButton(
                     text=f"{i}. {p.name} — {p.address}",
-                    callback_data=f"select_pp:{p.id}" )
+                    callback_data=f"select_pp:{p.id}"
+                )
             ])
         await message.answer("Список ПВЗ:", reply_markup=kb)
 
-    # 10) Обработка выбора ПВЗ и сброс state
+    # 10) Обработка выбора ПВЗ → ЗДЕСЬ отправляем полное «📦 Заказ сформирован», включая выбранный ПВЗ
     @dp.callback_query(UploadFSM.choosing_pickup_point, F.data.startswith("select_pp:"))
     async def select_pickup(callback: CallbackQuery, state: FSMContext):
         pp_id = int(callback.data.split(":", 1)[1])
@@ -228,16 +227,38 @@ def register_upload_handlers(dp: Dispatcher):
         db = SessionLocal()
         pp = db.query(PickupPoint).filter_by(id=pp_id).first()
         pp_name, pp_address = pp.name, pp.address
+
         order = db.query(Order).filter_by(order_id=order_id).first()
         if order:
             order.delivery_point = pp_name
             db.commit()
-        db.close()
 
-        await callback.message.answer(
-            f"📍 Вы выбрали ПВЗ: {pp_name}\n{pp_address}",
-            reply_markup=main_menu_keyboard(),
-        )
+            # Собираем все данные для финального сообщения:
+            photo_lines = [
+                f"• {p['filename']} — {p['format']}, {p['copies']} коп." 
+                for p in order.photos
+            ]
+            price_str = f"{float(order.price):.2f}".rstrip("0").rstrip(".")
+            discount_str = f"{float(order.discount):.2f}".rstrip("0").rstrip(".")
+            comment_display = order.comment or "—"
+            delivery_display = pp_name
+
+            text = (
+                "📦 <b>Заказ сформирован</b>\n\n"
+                + "\n".join(photo_lines) + "\n\n"
+                + f"💬 Комментарий: {comment_display}\n"
+                + f"💰 Стоимость: <b>{price_str} ₽</b> (скидка: {discount_str} ₽)\n"
+                + f"📍 Пункт выдачи: <b>{delivery_display}</b>\n"
+                + f"👤 Получатель: {order.receiver_name or '—'}\n"
+                + f"📞 Телефон: {order.receiver_phone or '—'}\n\n"
+                + "Ваш заказ будет отправлен в обработку после оплаты."
+            )
+
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=main_menu_keyboard())
+        else:
+            await callback.message.answer("❗ Не удалось сохранить пункт выдачи.")
+
+        db.close()
         await state.clear()
 
     # 11) Отмена заказа (во время создания)

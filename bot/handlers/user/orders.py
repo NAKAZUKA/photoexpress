@@ -90,7 +90,7 @@ def register_orders_handlers(dp: Dispatcher):
             db.query(Order)
             .filter_by(user_id=user.id, status=status_code)
             .order_by(desc(Order.created_at))
-            .limit(3)
+            .limit(1)
             .all()
         )
         db.close()
@@ -216,27 +216,6 @@ def register_orders_handlers(dp: Dispatcher):
             await callback_query.answer("❗ Заказ не найден.", show_alert=True)
 
             return
-
-        await state.update_data(editing_order_id=order_id)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📞 Телефон получателя", callback_data="editfield:receiver_phone")],
-            [InlineKeyboardButton(text="👤 ФИО получателя",    callback_data="editfield:receiver_name")]
-        ])
-        if order.status == 'new':
-            kb.inline_keyboard += [
-                [InlineKeyboardButton(text="🖼 Формат",         callback_data="editfield:format")],
-                [InlineKeyboardButton(text="🔢 Кол-во копий",   callback_data="editfield:copies")],
-                [InlineKeyboardButton(text="📍 Изменить ПВЗ",   callback_data=f"editpp:{order_id}")]
-            ]
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text="✅ Сохранить изменения", callback_data="back:status"),
-            InlineKeyboardButton(text="❌ Отменить редактирование", callback_data="back:status")
-        ])
-        await callback_query.message.answer(
-            f"Что вы хотите изменить для заказа #{order_id[:8]}?",
-            reply_markup=kb
-        )
-        await state.set_state(OrdersFSM.editing_field_choice)
 
     @dp.callback_query(F.data.startswith("editfield:"), OrdersFSM.editing_field_choice)
     async def ask_new_value(callback_query: CallbackQuery, state: FSMContext):
