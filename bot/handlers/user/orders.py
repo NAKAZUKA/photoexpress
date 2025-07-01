@@ -5,7 +5,10 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.enums.parse_mode import ParseMode
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from sqlalchemy import desc
+from sqlalchemy import desc, select
+from db.async_database import AsyncSessionLocal
+from bot.persistence.order_repo import SqlOrderRepo
+from bot.services.list_orders_uc import ListOrdersUC
 from sqlalchemy.orm.attributes import flag_modified
 from db.database import SessionLocal, Order, User, OrderStatus, PickupPoint
 
@@ -83,17 +86,17 @@ def register_orders_handlers(dp: Dispatcher):
     @dp.callback_query(F.data.startswith("status:"), OrdersFSM.choosing_status)
     async def show_orders_by_status(callback_query: CallbackQuery, state: FSMContext):
         status_code = callback_query.data.split(":", 1)[1]
-        db = SessionLocal()
-        user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
-        status = db.query(OrderStatus).filter_by(code=status_code).first()
-        orders = (
-            db.query(Order)
-            .filter_by(user_id=user.id, status=status_code)
-            .order_by(desc(Order.created_at))
-            .limit(1)
-            .all()
-        )
-        db.close()
+        async with AsyncSessionLocal() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_id == callback_query.from_user.id)
+            )
+            status = await session.scalar(
+                select(OrderStatus).where(OrderStatus.code == status_code)
+            )
+
+            repo = SqlOrderRepo(session)
+            uc   = ListOrdersUC(repo, page_size=1)
+            orders = await uc(user_id=user.id, status=status_code, page=0)
 
         if not orders:
             await callback_query.message.edit_text("❗ Заказы не найдены в этой категории.")
@@ -157,18 +160,17 @@ def register_orders_handlers(dp: Dispatcher):
         page = data.get("page",0)
         new_page = max(page-1,0) if direction=="prev" else page+1
 
-        db = SessionLocal()
-        user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
-        status = db.query(OrderStatus).filter_by(code=status_code).first()
-        orders = (
-            db.query(Order)
-            .filter_by(user_id=user.id, status=status_code)
-            .order_by(desc(Order.created_at))
-            .offset(new_page)
-            .limit(1)
-            .all()
-        )
-        db.close()
+        async with AsyncSessionLocal() as session:
+            user = await session.scalar(
+                select(User).where(User.telegram_id == callback_query.from_user.id)
+            )
+            status = await session.scalar(
+                select(OrderStatus).where(OrderStatus.code == status_code)
+            )
+
+            repo = SqlOrderRepo(session)
+            uc   = ListOrdersUC(repo, page_size=1)
+            orders = await uc(user_id=user.id, status=status_code, page=new_page)
         if not orders:
             await callback_query.answer("Больше нет заказов.", show_alert=True)
             return
