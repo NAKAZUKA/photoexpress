@@ -104,34 +104,37 @@ def register_orders_handlers(dp: Dispatcher):
         await _send_orders_list(callback_query.message, orders, status.label, 0)
         await state.set_state(OrdersFSM.browsing_orders)
 
-    @dp.callback_query(F.data.startswith("pay:"), OrdersFSM.browsing_orders)
-    async def pay_order(callback_query: CallbackQuery, state: FSMContext):
-        order_id = callback_query.data.split(":",1)[1]
+    # ----------  НОВЫЙ ХЕНДЛЕР  «✏ Изменить» из списка  ----------
+    @dp.callback_query(F.data.startswith("edit:"), OrdersFSM.browsing_orders)
+    async def start_inline_edit(callback_query: CallbackQuery, state: FSMContext):
+        order_id = callback_query.data.split(":", 1)[1]
+
         db = SessionLocal()
         order = db.query(Order).filter_by(order_id=order_id).first()
-        if order and not order.paid:
-            order.paid = True
-            db.commit()
-            await callback_query.answer("✅ Заказ оплачен.", show_alert=True)
-        else:
-            await callback_query.answer("❗ Невозможно оплатить этот заказ.", show_alert=True)
-
-        # Обновляем список на той же странице
-        data = await state.get_data()
-        status_code = data.get("status_filter")
-        page = data.get("page", 0)
-        user = db.query(User).filter_by(telegram_id=callback_query.from_user.id).first()
-        orders = (
-            db.query(Order)
-            .filter_by(user_id=user.id, status=status_code)
-            .order_by(desc(Order.created_at))
-            .offset(page * 1)
-            .limit(1)
-            .all()
-        )
-        status_label = db.query(OrderStatus).filter_by(code=status_code).first().label
         db.close()
-        await _send_orders_list(callback_query.message, orders, status_label, page)
+
+        if not order:
+            await callback_query.answer("❗ Заказ не найден.", show_alert=True)
+            return
+        if order.status != "new":
+            await callback_query.answer("Заказ уже в обработке — редактирование недоступно.", show_alert=True)
+            return
+
+        # сохраняем id редактируемого заказа в FSM-state
+        await state.update_data(editing_order_id=order_id)
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="👤 Получатель",      callback_data="editfield:receiver_name")],
+            [InlineKeyboardButton(text="📞 Телефон",         callback_data="editfield:receiver_phone")],
+            [InlineKeyboardButton(text="🖼 Формат фото",      callback_data="editfield:format")],
+            [InlineKeyboardButton(text="🔢 Кол-во копий",    callback_data="editfield:copies")],
+            [InlineKeyboardButton(text="📍 Пункт выдачи",     callback_data=f"editpp:{order_id}")],
+            [InlineKeyboardButton(text="🔙 Назад",            callback_data="back:status")],
+        ])
+
+        await callback_query.message.answer("Что хотите изменить?", reply_markup=kb)
+        await state.set_state(OrdersFSM.editing_field_choice)
+        await callback_query.answer()
 
     @dp.callback_query(F.data == "back:status")
     async def back_to_status(callback_query: CallbackQuery, state: FSMContext):
@@ -161,7 +164,7 @@ def register_orders_handlers(dp: Dispatcher):
             db.query(Order)
             .filter_by(user_id=user.id, status=status_code)
             .order_by(desc(Order.created_at))
-            .offset(new_page*1)
+            .offset(new_page)
             .limit(1)
             .all()
         )
@@ -304,7 +307,7 @@ def register_orders_handlers(dp: Dispatcher):
             [InlineKeyboardButton(text="✅ Готово",                    callback_data="back:status")]
         ])
         await source_msg.answer(res_text, reply_markup=kb, parse_mode=ParseMode.HTML)
-        await state.clear()
+        await state.set_state(OrdersFSM.browsing_orders)
 
     @dp.callback_query(F.data.startswith("editpp:"), OrdersFSM.editing_field_choice)
     async def edit_pickup(callback_query: CallbackQuery, state: FSMContext):

@@ -218,8 +218,6 @@ def register_upload_handlers(dp: Dispatcher):
             )
             db.add(new_order)
 
-            # Помечаем, что у пользователя первый заказ уже “занят”
-            user.first_order_paid = True
             db.commit()
             db.close()
 

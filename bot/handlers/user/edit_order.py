@@ -20,7 +20,7 @@ def register_edit_order_handlers(dp: Dispatcher):
         last_order = db.query(Order).filter_by(user_id=user.id).order_by(Order.created_at.desc()).first()
         db.close()
 
-        if not last_order or last_order.status != "новый":
+        if not last_order or last_order.status != "new":
             await message.answer("Вы можете редактировать только активный (новый) заказ.")
             return
 
@@ -80,7 +80,7 @@ def register_edit_order_handlers(dp: Dispatcher):
         db = SessionLocal()
         user = db.query(User).filter_by(telegram_id=message.from_user.id).first()
         order = db.query(Order).filter_by(user_id=user.id).order_by(Order.created_at.desc()).first()
-        if order and order.status == "новый":
+        if order and order.status == "new":
             order.comment = new_comment
             db.commit()
             await message.answer("✅ Комментарий обновлён.", reply_markup=main_menu_keyboard())

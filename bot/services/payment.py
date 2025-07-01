@@ -1,9 +1,10 @@
-from db.database import SessionLocal, Order, OrderStatus, User
+# bot/services/payment.py
+from db.database import SessionLocal, Order, User
 
-async def mark_order_paid(order_id: str) -> Order:
+async def mark_order_paid(order_id: str) -> Order | None:
     """
-    Помечает заказ как оплаченный (paid=True), оставляет статус 'new'.
-    Возвращает обновленный объект Order.
+    Помечает заказ как оплаченный и, если это первый оплаченный заказ
+    пользователя, выставляет user.first_order_paid = True.
     """
     db = SessionLocal()
     order = db.query(Order).filter_by(order_id=order_id).first()
@@ -11,10 +12,13 @@ async def mark_order_paid(order_id: str) -> Order:
         db.close()
         return None
 
-    # Помечаем как оплаченный
     order.paid = True
-    db.commit()
 
-    db.refresh(order)
+    user = db.query(User).filter_by(id=order.user_id).first()
+    if user and not user.first_order_paid:
+        user.first_order_paid = True
+
+    db.commit()          
+    db.refresh(order)    
     db.close()
     return order
