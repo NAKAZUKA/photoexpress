@@ -2,38 +2,67 @@ import asyncio
 from datetime import datetime, timedelta
 
 from aiogram import Bot
-from db.database import SessionLocal, Order, OrderStatus, User
+from sqlalchemy import select
 
-async def order_status_updater(bot: Bot):
+# модели остаются теми же — мы лишь меняем способ доступа к БД
+from db.database import Order, OrderStatus, User
+from db.async_database import AsyncSessionLocal
+
+
+async def order_status_updater(bot: Bot) -> None:
     """
-    Каждые 60 секунд переводит оплаченные заказы со статусом 'new' старше 5 минут в 'in_progress'
-    и уведомляет пользователя.
+    Каждые 60 секунд:
+    • Находит оплаченные заказы со статусом 'new', созданные ≥ 5 минут назад
+    • Переводит их в 'in_progress'
+    • Шлёт пользователю уведомление
+    Работает полностью асинхронно, не блокируя event-loop.
     """
     while True:
         await asyncio.sleep(60)
+
         now = datetime.utcnow()
         threshold = now - timedelta(minutes=5)
 
-        db = SessionLocal()
-        # находим все оплаченные новые заказы, старше threshold
-        ready = (
-            db.query(Order)
-            .filter(Order.status == "new", Order.paid == True, Order.created_at <= threshold)
-            .all()
-        )
-        in_prog = db.query(OrderStatus).filter_by(code="in_progress").first()
-
-        for order in ready:
-            order.status = in_prog.code
-            db.commit()
-
-            user = db.query(User).filter_by(id=order.user_id).first()
-            try:
-                await bot.send_message(
-                    user.telegram_id,
-                    f"🛠 Заказ #{order.order_id[:8]} переведён в статус «{in_prog.label}»."
+        async with AsyncSessionLocal() as session:
+            # 1) выбираем заказы, которые пора перевести
+            result = await session.execute(
+                select(Order).where(
+                    Order.status == "new",
+                    Order.paid.is_(True),
+                    Order.created_at <= threshold
                 )
-            except Exception:
-                pass
+            )
+            orders_to_process = result.scalars().all()
 
-        db.close()
+            if not orders_to_process:
+                continue  # ничего не делаем — ждём следующего цикла
+
+            # 2) получаем объект статуса "in_progress" один раз
+            in_prog: OrderStatus | None = await session.scalar(
+                select(OrderStatus).where(OrderStatus.code == "in_progress")
+            )
+            if in_prog is None:  # защита от случаев, когда в БД нет такого статуса
+                in_prog_code, in_prog_label = "in_progress", "🛠 В обработке"
+            else:
+                in_prog_code, in_prog_label = in_prog.code, in_prog.label
+
+            # 3) обновляем каждый заказ и шлём сообщение
+            for order in orders_to_process:
+                order.status = in_prog_code
+
+                # берём пользователя (можем «прижать» selectinload, но здесь достаточно scalar)
+                user = await session.scalar(
+                    select(User).where(User.id == order.user_id)
+                )
+                if user:
+                    try:
+                        await bot.send_message(
+                            user.telegram_id,
+                            f"🛠 Заказ #{order.order_id[:8]} переведён в статус «{in_prog_label}»."
+                        )
+                    except Exception:
+                        # не прерываем цикл, если Telegram API дал ошибку
+                        pass
+
+            # 4) фиксируем изменения
+            await session.commit()
